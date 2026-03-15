@@ -1,6 +1,6 @@
 # Stack Blueprint Prompt
 
-You are an expert .NET full-stack architect. Your task is to scaffold a complete application using the architecture described below. Replace all placeholders: `{ProjectName}` (PascalCase), `{projectname}` (lowercase), `{DomainEntity}` (primary domain object), and `{DotNetVersion}` (target framework, default: `net10.0`).
+You are an expert .NET full-stack architect. Your task is to scaffold a complete application using the architecture described below. Replace all placeholders: `{ProjectName}` (PascalCase), `{projectname}` (lowercase), `{DomainEntity}` (primary domain object), `{DotNetVersion}` (target framework, default: `net10.0`), and `{AwsProfile}` (AWS named profile for local dev).
 
 ---
 
@@ -10,7 +10,7 @@ Follow this process strictly:
 
 1. **Ask all clarifying questions** (Section 1) before writing any code
 2. Based on answers, identify which **module files** (`dotnet/*.md`) to reference
-3. Replace all placeholders throughout: `{ProjectName}`, `{projectname}`, `{DomainEntity}`, `{DotNetVersion}`
+3. Replace all placeholders throughout: `{ProjectName}`, `{projectname}`, `{DomainEntity}`, `{DotNetVersion}`, `{AwsProfile}`
 4. Design domain-specific entities, access patterns, and API endpoints from the user's answers
 5. Scaffold in order: **Infrastructure -> Server -> Web/Mobile -> CI/CD -> CLAUDE.md**
 6. Generate `CLAUDE.md` last, summarizing the project's actual architecture
@@ -30,6 +30,7 @@ Ask these before scaffolding. Adapt the architecture based on answers.
 ### Database
 
 4. **DynamoDB** (single-table, serverless, PAY_PER_REQUEST) or **PostgreSQL** (Aurora Serverless v2, relational, VPC-isolated)? DynamoDB is the default for serverless-first workloads. Choose Postgres if the domain has complex relational queries, joins, or strict transactional requirements.
+   - *If PostgreSQL:* **RDS Proxy?** Recommended for production workloads. RDS Proxy pools database connections so concurrent Lambda invocations don't exhaust PostgreSQL's connection limit. Say **yes** for production-grade deployments, **no** for dev/prototype.
 
 ### Clients
 
@@ -39,27 +40,31 @@ Ask these before scaffolding. Adapt the architecture based on answers.
 
 6. Should request/response DTOs shared between clients and Server live in a **shared class library** (`Shared/Shared.csproj`), or be **duplicated per project** (default)? Duplication is simpler; a shared library reduces drift but adds build complexity.
 
+### AWS
+
+7. **AWS profile for local development?** (e.g., `default`, `mycompany-dev`) — used to configure the credentials provider so local runs target the correct AWS account.
+
 ### AWS Services
 
-7. **File/image uploads?** (-> S3 — see `dotnet/S3_STORAGE_MODULE.md`)
-8. **Transactional emails?** (-> SES — see `dotnet/EMAIL_SES_MODULE.md`)
-9. **Other AWS services?** (Location Service, EventBridge Scheduler, etc. — see relevant modules)
+8. **File/image uploads?** (-> S3 — see `dotnet/S3_STORAGE_MODULE.md`)
+9. **Transactional emails?** (-> SES — see `dotnet/EMAIL_SES_MODULE.md`)
+10. **Other AWS services?** (Location Service, EventBridge Scheduler, etc. — see relevant modules)
 
 ### Third-Party Integrations
 
-10. **Billing/payments?** Provider? (Stripe default — see `dotnet/STRIPE_MODULE.md`)
-11. **Push notifications?** Provider? (OneSignal/FCM — see `dotnet/PUSH_NOTIFICATIONS_MODULE.md`)
+11. **Billing/payments?** Provider? (Stripe default — see `dotnet/STRIPE_MODULE.md`)
+12. **Push notifications?** Provider? (OneSignal/FCM — see `dotnet/PUSH_NOTIFICATIONS_MODULE.md`)
 
 ### Features
 
-12. **Mobile background processing?** Describe the work. (see `dotnet/BACKGROUND_PROCESSING_MODULE.md`)
-13. **Shareable public links?** (see `dotnet/SHARE_LINKS_MODULE.md`)
-14. **Report/PDF generation?** (see `dotnet/REPORT_GENERATION_MODULE.md`)
-15. **Scheduled/deferred tasks?** (see `dotnet/SCHEDULED_TASKS_MODULE.md`)
+13. **Mobile background processing?** Describe the work. (see `dotnet/BACKGROUND_PROCESSING_MODULE.md`)
+14. **Shareable public links?** (see `dotnet/SHARE_LINKS_MODULE.md`)
+15. **Report/PDF generation?** (see `dotnet/REPORT_GENERATION_MODULE.md`)
+16. **Scheduled/deferred tasks?** (see `dotnet/SCHEDULED_TASKS_MODULE.md`)
 
 ### Branding
 
-16. **Primary brand color?** (hex code or name — used in MAUI Colors.xaml and Web CSS variables)
+17. **Primary brand color?** (hex code or name — used in MAUI Colors.xaml and Web CSS variables)
 
 ---
 
@@ -119,6 +124,10 @@ public class LocalEntryPoint
 {
     public static void Main(string[] args)
     {
+        var chain = new CredentialProfileStoreChain();
+        if (chain.TryGetAWSCredentials("{AwsProfile}", out var credentials))
+            FallbackCredentialsFactory.CredentialsGenerators.Insert(0, () => credentials);
+
         Host.CreateDefaultBuilder(args)
             .ConfigureWebHostDefaults(webBuilder => webBuilder.UseStartup<Startup>())
             .Build().Run();
@@ -135,7 +144,7 @@ public class LocalEntryPoint
 4. Add `MemoryCache`
 5. Register domain services as scoped (interface + implementation pairs)
 6. Register HttpClient-based services with `AddHttpClient<TInterface, TImpl>()`
-7. Configure JWT Bearer authentication with `SymmetricSecurityKey`, zero `ClockSkew`
+7. Configure JWT Bearer authentication with `SymmetricSecurityKey`, zero `ClockSkew` (DynamoDB path) — or `AddIdentityApiEndpoints` + `AddEntityFrameworkStores` (PostgreSQL path, see Section 9.6)
 8. Set `FallbackPolicy` to `RequireAuthenticatedUser()`
 9. `AddControllers()`
 10. Configure CORS (AllowAnyOrigin, AllowAnyMethod, AllowAnyHeader for API Gateway proxy)
@@ -144,12 +153,14 @@ public class LocalEntryPoint
 1. `UseDeveloperExceptionPage()` (dev only)
 2. `UseRouting()`
 3. `UseCors()`
-4. `UseMiddleware<JwtAuthenticationMiddleware>()` (custom, before built-in auth)
+4. `UseMiddleware<JwtAuthenticationMiddleware>()` (custom, before built-in auth) — PostgreSQL path: skip, Identity handles token validation
 5. `UseAuthentication()`
 6. `UseAuthorization()`
-7. `UseEndpoints()` with `MapControllers()` + root health endpoint
+7. `UseEndpoints()` with `MapControllers()` + root health endpoint — PostgreSQL path: also call `app.MapIdentityApi<AppUser>()` here
 
 ### 3.3 Custom JWT Middleware
+
+> **PostgreSQL path:** Not used — Identity's data-protection bearer token middleware handles token validation.
 
 `JwtAuthenticationMiddleware` sits before `UseAuthentication()`. It:
 - Extracts Bearer token from Authorization header
@@ -177,10 +188,10 @@ public class {Resource}Controller : ControllerBase
 ```
 
 **Core controllers** (always included):
-- **AuthController** (`/api/auth`): `POST /login`, `POST /refresh`
-- **UsersController** (`/api/users`): `POST /signup` `[AllowAnonymous]`, profile CRUD
+- **AuthController** (`/api/auth`): `POST /login`, `POST /refresh` — PostgreSQL path: replaced by `MapIdentityApi` (`/login`, `/refresh`)
+- **UsersController** (`/api/users`): `POST /signup` `[AllowAnonymous]`, profile CRUD — PostgreSQL path: admin CRUD via `UserManager<AppUser>`; own profile via `/manage/info`
 - **HealthCheckController** (`/health`): `GET /` `[AllowAnonymous]` — returns 200
-- **PasswordResetController** (`/api/password-reset`): `POST /request` `[AllowAnonymous]`, `POST /confirm` `[AllowAnonymous]`
+- **PasswordResetController** (`/api/password-reset`): `POST /request` `[AllowAnonymous]`, `POST /confirm` `[AllowAnonymous]` — PostgreSQL path: replaced by `/forgotPassword` + `/resetPassword` from `MapIdentityApi`
 - **{DomainEntity}Controller** (`/api/{resource}`): CRUD + domain-specific operations
 
 Additional controllers are added by modules (Stripe, ShareLinks, etc.).
@@ -207,6 +218,7 @@ public class AppSettings
     }
 }
 
+// DynamoDB path only — PostgreSQL path: removed (Identity manages token config internally)
 public class JwtSettings
 {
     public string SecretKey { get; set; } = null!;
@@ -273,9 +285,9 @@ Every service follows the interface + implementation pattern:
 - All methods are async (`Task<T>`)
 
 **Core services** (always included):
-- **Auth**: Login, signup, token refresh, password hashing (BCrypt), JWT generation
-- **JWT**: Generate access tokens (ClaimTypes.NameIdentifier, ClaimTypes.Email), validate, extract claims
-- **Password**: BCrypt hash + verify
+- **Auth**: Login, signup, token refresh, password hashing (BCrypt), JWT generation — PostgreSQL path: removed; `MapIdentityApi` handles login/signup/refresh, `UserManager` handles password hashing
+- **JWT**: Generate access tokens (ClaimTypes.NameIdentifier, ClaimTypes.Email), validate, extract claims — PostgreSQL path: removed; Identity issues data-protection bearer tokens (not JWTs) with `sub`, `email`, and role claims
+- **Password**: BCrypt hash + verify — PostgreSQL path: removed; `UserManager<AppUser>` handles password hashing/verification internally
 - **DynamoDb** (or **AppDbContext** for Postgres): Central data access
 
 Additional services are added by modules (S3, Email, Stripe, etc.). Follow the same interface + implementation pattern for all domain services.
@@ -289,7 +301,9 @@ Additional services are added by modules (S3, Email, Stripe, etc.). Follow the s
 <PackageReference Include="AWSSDK.SecretsManager" />
 <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
 <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
-<PackageReference Include="BCrypt.Net-Next" />
+<PackageReference Include="BCrypt.Net-Next" />          <!-- DynamoDB path only; excluded for PostgreSQL -->
+<!-- PostgreSQL path adds: -->
+<!-- <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" /> -->
 ```
 
 Module-specific packages are listed in each module file.
@@ -359,12 +373,16 @@ await builder.Build().RunAsync();
 - Returns anonymous principal if token missing or expired
 - Exposes `NotifyAuthenticationStateChanged()` for login/logout state transitions
 
+> **PostgreSQL path:** Identity issues opaque data-protection tokens — the client cannot decode them to extract claims. `AuthStateProvider` should store `email` from the login response (or fetch from `GET /manage/info`) and construct claims from that, rather than parsing the token. Use `ClaimsIdentity("Bearer")` instead of `ClaimsIdentity("jwt")`.
+
 **AuthService**:
 - `LoginAsync(request)` -> POST to `api/auth/login` -> stores tokens in localStorage -> notifies auth state
 - `LogoutAsync()` -> removes all tokens from localStorage -> notifies auth state
 - `GetTokenAsync()` -> checks expiry (5-min buffer) -> auto-refreshes if needed -> returns token
 - `RefreshTokenAsync()` -> POST to `api/auth/refresh` -> updates stored tokens -> logs out on failure
 - `IsAuthenticatedAsync()` -> calls `GetTokenAsync()` and checks non-null
+
+> **PostgreSQL path:** Change endpoints to `POST /login?useCookies=false` and `POST /refresh`. Parse response fields: `accessToken`, `refreshToken`, `expiresIn` (seconds). Compute `tokenExpiry = DateTime.UtcNow.AddSeconds(expiresIn)`.
 
 **localStorage keys**: `authToken`, `refreshToken`, `tokenExpiry`, `userEmail`
 
@@ -717,6 +735,19 @@ var networkStack = new NetworkStack(app, $"{stackPrefix}-Network-{stage}", new S
 var databaseStack = new DatabaseStack(app, $"{stackPrefix}-Database-{stage}", new StackProps { Env = env, TerminationProtection = true });
 var webStack = new WebStack(app, $"{stackPrefix}-Web-{stage}", new WebStackProps { Env = env, TerminationProtection = true });
 
+// [Postgres + RDS Proxy only]
+var rdsProxyStack = new RdsProxyStack(app, $"{stackPrefix}-RdsProxy-{stage}", new RdsProxyStackProps
+{
+    Env = env,
+    TerminationProtection = true,
+    Vpc = networkStack.Vpc,
+    RdsSecurityGroup = networkStack.RdsSecurityGroup,
+    DatabaseCluster = databaseStack.Database,
+    DatabaseSecret = databaseStack.DatabaseSecret,
+});
+rdsProxyStack.AddDependency(networkStack);
+rdsProxyStack.AddDependency(databaseStack);
+
 // Dependent stacks
 var apiStack = new ApiStack(app, $"{stackPrefix}-Api-{stage}", new ApiStackProps
 {
@@ -725,15 +756,18 @@ var apiStack = new ApiStack(app, $"{stackPrefix}-Api-{stage}", new ApiStackProps
     Vpc = networkStack.Vpc,
     LambdaSecurityGroup = networkStack.LambdaSecurityGroup,
     Table = databaseStack.Table,
-    JwtSecret = secretsStack.JwtSecret,
+    JwtSecret = secretsStack.JwtSecret,                   // [DynamoDB path only]
+    DatabaseProxyEndpoint = rdsProxyStack.ProxyEndpoint, // [Postgres + RDS Proxy only]
+    DatabaseSecret = databaseStack.DatabaseSecret,       // [Postgres + RDS Proxy only]
     // Add module-specific cross-stack refs (StorageBucket, etc.)
 });
 apiStack.AddDependency(secretsStack);
 apiStack.AddDependency(networkStack);
 apiStack.AddDependency(databaseStack);
+apiStack.AddDependency(rdsProxyStack); // [Postgres + RDS Proxy only]
 
 // Apply tags
-foreach (var stack in new Stack[] { secretsStack, networkStack, databaseStack, apiStack, webStack })
+foreach (var stack in new Stack[] { secretsStack, networkStack, databaseStack, rdsProxyStack, apiStack, webStack })
 {
     foreach (var tag in commonTags)
         Tags.Of(stack).Add(tag.Key, tag.Value);
@@ -753,6 +787,8 @@ public class ApiStackProps : StackProps
     public ISecurityGroup LambdaSecurityGroup { get; set; } = null!;
     public ITable Table { get; set; } = null!;
     public ISecret JwtSecret { get; set; } = null!;
+    public string DatabaseProxyEndpoint { get; set; } = null!; // [Postgres + RDS Proxy only]
+    public ISecret DatabaseSecret { get; set; } = null!;       // [Postgres + RDS Proxy only]
     // Add module-specific props: IBucket StorageBucket, etc.
 }
 ```
@@ -760,7 +796,7 @@ public class ApiStackProps : StackProps
 ### 6.3 Stack Implementations
 
 #### SecretsStack
-- JWT secret: Auto-generated 64-character string via `Secret` construct
+- JWT secret: Auto-generated 64-character string via `Secret` construct (DynamoDB path only — PostgreSQL path: not needed, Identity uses data-protection keys)
 - Additional secrets for module integrations (Stripe keys, push notification keys, etc.)
 - Expose as public properties for cross-stack references
 
@@ -783,7 +819,7 @@ public class ApiStackProps : StackProps
 
 #### ApiStack
 - **API Lambda**: 512MB memory, 90s timeout, {DotNetVersion} runtime, VPC placement in private subnets
-  - Environment variables: `TABLE_NAME`, `JWT_SECRET_ARN`, `STAGE`, `API_GATEWAY_URL`, `WEB_APP_URL`, `ASPNETCORE_ENVIRONMENT`, `DEPLOYMENT_TIMESTAMP`, plus module-specific vars
+  - Environment variables: `TABLE_NAME`, `JWT_SECRET_ARN` (DynamoDB path only), `STAGE`, `API_GATEWAY_URL`, `WEB_APP_URL`, `ASPNETCORE_ENVIRONMENT`, `DEPLOYMENT_TIMESTAMP`, plus module-specific vars
   - IAM: DynamoDB read/write, Secrets Manager read, plus module-specific permissions
 - **API Gateway**: REST API with Lambda proxy integration
   - Routes: `/` and `/{proxy+}` -> Lambda
@@ -803,6 +839,12 @@ public class ApiStackProps : StackProps
 - `BucketDeployment` from `Web/bin/Release/{DotNetVersion}/publish/wwwroot`
 - Expose: `WebAppUrl`, `WebBucket`, `WebDistribution`
 
+#### RdsProxyStack (Postgres + RDS Proxy only)
+- `DatabaseProxy` construct targeting Aurora cluster, Secrets Manager auth
+- Engine family: POSTGRESQL, require TLS, idle client timeout 1800s, max connections 80%
+- Placed in private subnets using `RdsSecurityGroup`
+- Expose: `ProxyEndpoint`
+
 ### 6.4 Stack Dependencies
 
 ```
@@ -810,9 +852,10 @@ SecretsStack     (independent)
 NetworkStack     (independent)
 DatabaseStack    (independent with DynamoDB; depends on NetworkStack with Postgres)
 WebStack         (independent)
+RdsProxyStack    -> depends on Network, Database (Postgres + RDS Proxy only)
 
 ApiStack         -> depends on Secrets, Network, Database
-                    (+ Storage, Notification, etc. based on modules)
+                    (+ RdsProxy when using proxy, + Storage, Notification, etc. based on modules)
 ```
 
 When using Postgres, add `databaseStack.AddDependency(networkStack)` since the DatabaseStack needs the VPC and RdsSecurityGroup.
@@ -829,8 +872,22 @@ When using Postgres, add `databaseStack.AddDependency(networkStack)` since the D
 
 ## 7. Authentication Flow (End-to-End)
 
+> **PostgreSQL path — Identity bearer token format:**
+> ```
+> POST /login?useCookies=false
+> → { "tokenType": "Bearer", "accessToken": "...", "expiresIn": 3600, "refreshToken": "..." }
+>
+> POST /refresh
+> → { "tokenType": "Bearer", "accessToken": "...", "expiresIn": 3600, "refreshToken": "..." }
+> ```
+> Client-side changes (Postgres path):
+> - Web `AuthService`: POST to `/login?useCookies=false`, parse `accessToken`/`refreshToken`/`expiresIn`
+> - Mobile `AuthService`: Same endpoint changes; compute `ExpiresAt = DateTime.UtcNow.AddSeconds(expiresIn)`
+> - localStorage key `authToken` still works; update response deserialization to read `accessToken` field
+
 ### 7.1 Signup
 
+**DynamoDB path:**
 ```
 Mobile/Web                          Server
    |                                  |
@@ -849,12 +906,39 @@ Mobile/Web                          Server
    | Store tokens locally            |
 ```
 
+**PostgreSQL path:**
+```
+Mobile/Web                          Server (Identity)
+   |                                  |
+   | POST /register                  |
+   | {email, password}              |
+   |-------------------------------->|
+   |                                  | PBKDF2 hash password (Identity default)
+   |                                  | Create AppUser in AspNetUsers
+   |                                  | Send confirmation email (if configured)
+   |<--------------------------------|
+   | 200 OK                          |
+   |                                  |
+   | POST /login?useCookies=false   |
+   |-------------------------------->|
+   |                                  | Validate credentials
+   |                                  | Issue data-protection bearer token
+   |<--------------------------------|
+   | {tokenType, accessToken,       |
+   |  expiresIn, refreshToken}      |
+   |                                  |
+   | Store tokens locally            |
+```
+
 ### 7.2 Login
 
-Same as signup flow but validates BCrypt hash instead of creating user.
+**DynamoDB path:** Same as signup flow but validates BCrypt hash instead of creating user.
+
+**PostgreSQL path:** `POST /login?useCookies=false` — Identity validates credentials via `UserManager`, returns bearer + refresh token (see 7.1 diagram above).
 
 ### 7.3 Token Refresh
 
+**DynamoDB path:**
 ```
 Mobile/Web                          Server
    |                                  |
@@ -869,6 +953,8 @@ Mobile/Web                          Server
    |<--------------------------------|
    | {Token, RefreshToken, ...}      |
 ```
+
+**PostgreSQL path:** `POST /refresh` with `{ "refreshToken": "..." }` — Identity rotates the data-protection token pair internally.
 
 ### 7.4 Auto-Refresh Pattern
 
@@ -963,7 +1049,7 @@ Every service has an `I{Name}Service` interface and `{Name}Service` implementati
 
 ### 9.3 Configuration from Environment
 
-Server settings are loaded from environment variables (set by CDK Lambda configuration). Secrets come from AWS Secrets Manager via ARN environment variables. Local dev uses fallback default values or direct env vars.
+Server settings are loaded from environment variables (set by CDK Lambda configuration). Secrets come from AWS Secrets Manager via ARN environment variables. Local dev uses fallback default values or direct env vars. `LocalEntryPoint` injects the named AWS profile (`{AwsProfile}`) via `CredentialProfileStoreChain` so local runs target the correct AWS account.
 
 ### 9.4 Lambda + Kestrel Dual Entry Point
 
@@ -1088,16 +1174,111 @@ All entities share one table. Each entity defines its PK/SK pattern as computed 
 > - Add Lambda environment variables: `DATABASE_SECRET_ARN` and `DATABASE_SECRET_NAME`
 > - Lambda remains in `PRIVATE_WITH_EGRESS` subnets using the `LambdaSecurityGroup`
 >
-> **Infrastructure changes — RDS Proxy (optional, for high-concurrency):**
-> If Lambda concurrency causes connection exhaustion, add an `RdsProxyStack` with a `CfnDBProxy` (engine family `POSTGRESQL`, TLS required, 30-minute idle timeout). Place the proxy in private subnets using the `RdsSecurityGroup`.
+> **Infrastructure changes — RdsProxyStack (Postgres + RDS Proxy only):**
 >
-> **Server changes:**
-> - Replace `IDynamoDbService` / `DynamoDbService` with Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`)
-> - Create an `AppDbContext : DbContext` with `DbSet<T>` properties for each entity
+> ```csharp
+> public class RdsProxyStackProps : StackProps
+> {
+>     public IVpc Vpc { get; set; } = null!;
+>     public ISecurityGroup RdsSecurityGroup { get; set; } = null!;
+>     public IDatabaseCluster DatabaseCluster { get; set; } = null!;
+>     public ISecret DatabaseSecret { get; set; } = null!;
+> }
+>
+> public class RdsProxyStack : Stack
+> {
+>     public string ProxyEndpoint { get; private set; }
+>
+>     internal RdsProxyStack(Construct scope, string id, RdsProxyStackProps props) : base(scope, id, props)
+>     {
+>         var proxy = new DatabaseProxy(this, "RdsProxy", new DatabaseProxyProps
+>         {
+>             ProxyTarget = ProxyTarget.FromCluster(props.DatabaseCluster),
+>             Secrets = new[] { props.DatabaseSecret },
+>             Vpc = props.Vpc,
+>             SecurityGroups = new[] { props.RdsSecurityGroup },
+>             VpcSubnets = new SubnetSelection { SubnetType = SubnetType.PRIVATE_WITH_EGRESS },
+>             RequireTLS = true,
+>             IdleClientTimeout = Duration.Seconds(1800),
+>             MaxConnectionsPercent = 80,
+>             MaxIdleConnectionsPercent = 10,
+>             DbProxyName = "{projectname}-proxy",
+>         });
+>
+>         ProxyEndpoint = proxy.Endpoint;
+>     }
+> }
+> ```
+>
+> **Infrastructure changes — ApiStack wiring (Postgres + RDS Proxy only):**
+> - Add `DATABASE_PROXY_ENDPOINT` environment variable to Lambda: `props.DatabaseProxyEndpoint`
+> - Grant the Lambda execution role `props.DatabaseSecret` read access
+> - In `Startup.cs`, build the connection string using the proxy endpoint instead of the Aurora cluster endpoint:
+>
+> ```csharp
+> var secret = JsonSerializer.Deserialize<DatabaseSecret>(secretValue);
+> var connectionString = $"Host={Environment.GetEnvironmentVariable("DATABASE_PROXY_ENDPOINT")};"
+>     + $"Port={secret.Port};Database={secret.DbName};"
+>     + $"Username={secret.Username};Password={secret.Password};"
+>     + "SSL Mode=Require;Trust Server Certificate=true;";
+> ```
+>
+> **Server changes (PostgreSQL path):**
+> - Replace plain `User : class` with `AppUser : IdentityUser` — add domain-specific properties (`DisplayName`, etc.) as extra columns; EF migrations persist them alongside Identity's built-in schema
+> - Replace `IDynamoDbService` / `DynamoDbService` with Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`); replace `AppDbContext : DbContext` with `AppDbContext : IdentityDbContext<AppUser>` — add `DbSet<T>` for each domain entity (no manual `Users` DbSet needed, Identity provides it)
 > - Register with `AddDbContext<AppDbContext>()` in `Startup.cs`, reading the connection string from Secrets Manager at startup
 > - Remove PK/SK computed properties from models; use standard `Id` (Guid) primary keys, foreign keys, and navigation properties
-> - Use EF Core migrations for schema management
-> - Add `Microsoft.EntityFrameworkCore` and `Npgsql.EntityFrameworkCore.PostgreSQL` NuGet packages
+> - Use EF Core migrations for schema management (`dotnet ef migrations add Initial` creates all `AspNetUsers`, `AspNetRoles`, etc. tables plus domain entity tables)
+> - In `Startup.cs` / `Program.cs`, replace manual JWT Bearer + BCrypt setup with:
+>
+> ```csharp
+> builder.Services.AddIdentityApiEndpoints<AppUser>(opts =>
+> {
+>     opts.Password.RequiredLength = 8;
+>     opts.User.RequireUniqueEmail = true;
+>     opts.SignIn.RequireConfirmedEmail = true; // requires IEmailSender<AppUser> — set to false if no email module included
+>     opts.Lockout.MaxFailedAccessAttempts = 5;
+> })
+> .AddRoles<IdentityRole>()
+> .AddEntityFrameworkStores<AppDbContext>();
+>
+> // AddIdentityApiEndpoints registers the bearer token scheme internally —
+> // no need to call AddAuthentication().AddBearerToken() again.
+> // Identity uses data-protection tokens (not JWTs).
+> builder.Services.AddAuthorizationBuilder().SetFallbackPolicy(
+>     new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
+> ```
+>
+> - Map Identity built-in endpoints after `app.UseAuthorization()`:
+>
+> ```csharp
+> app.MapIdentityApi<AppUser>(); // provides /register, /login, /refresh, /confirmEmail,
+>                                 // /forgotPassword, /resetPassword, /manage/info, /manage/2fa
+> ```
+>
+> - **Remove** (Postgres path only): `PasswordService` + `IPasswordService`, `AuthController` (replaced by `/login`), `PasswordResetController` (replaced by `/forgotPassword` + `/resetPassword`), `JwtAuthenticationMiddleware` (Identity validates tokens), `BCrypt.Net-Next` NuGet package
+> - **Add** NuGet: `Microsoft.AspNetCore.Identity.EntityFrameworkCore`
+> - `UsersController` (`/api/users`) becomes an **admin** controller only — inject `UserManager<AppUser>` and `RoleManager<IdentityRole>`, require `[Authorize(Roles = "Admin")]`:
+>   - `GET /api/users` — list users
+>   - `GET /api/users/{id}` — get user by id
+>   - `PUT /api/users/{id}/lock` — `userManager.SetLockoutEndDateAsync(user, DateTimeOffset.UtcNow.AddYears(100))`
+>   - `PUT /api/users/{id}/unlock` — `userManager.SetLockoutEndDateAsync(user, null)`
+>   - `POST /api/users/{id}/roles` — `userManager.AddToRolesAsync(user, roles)`
+>   - `DELETE /api/users/{id}/roles` — `userManager.RemoveFromRolesAsync(user, roles)`
+>   - `POST /api/users/{id}/claims` — `userManager.AddClaimAsync(user, claim)`
+>   - Authenticated user's own profile CRUD moves to Identity's built-in `GET/POST /manage/info`
+> - Remove `RefreshToken` and `PasswordResetToken` models — Identity manages tokens internally via `AspNetUserTokens` table
+> - `JwtService` can be removed — Identity issues data-protection bearer tokens (not JWTs) containing `sub`, `email`, and role claims out of the box
+> - Use `User.FindFirstValue(ClaimTypes.NameIdentifier)` in controllers to get the current user's ID (same as before)
+> - **Email confirmation**: `RequireConfirmedEmail = true` requires a registered `IEmailSender<AppUser>`. If the SES module is included, register `builder.Services.AddSingleton<IEmailSender<AppUser>, SesEmailSender>()`. Without this, users can register but never confirm their email and are locked out of login.
+> - **Data-protection key persistence**: Identity's bearer tokens are encrypted with data-protection keys. Lambda's default in-memory key ring is ephemeral — keys are lost on cold start, invalidating all outstanding tokens. Persist keys to AWS Systems Manager Parameter Store:
+>
+> ```csharp
+> builder.Services.AddDataProtection()
+>     .PersistKeysToAWSSystemsManager("/dataprotection");
+> ```
+>
+> Add NuGet: `Amazon.AspNetCore.DataProtection.SSM`. Grant Lambda execution role `ssm:PutParameter` and `ssm:GetParametersByPath` on the `/dataprotection` path in ApiStack.
 
 ### 9.7 Authentication Fallback Policy
 
@@ -1125,28 +1306,29 @@ CDK sets `ASPNETCORE_ENVIRONMENT` based on stage: `"dev"` -> `"Development"`, an
       LocalEntryPoint.cs
       Configuration/
         AppSettings.cs
-        JwtSettings.cs
+        JwtSettings.cs                 (Postgres path: removed — Identity manages token config internally)
         {Integration}Settings.cs      (per module integration)
       Controllers/
-        AuthController.cs
+        AuthController.cs              (Postgres path: removed — replaced by MapIdentityApi)
         HealthCheckController.cs
         UsersController.cs
-        PasswordResetController.cs
+        PasswordResetController.cs     (Postgres path: removed — replaced by MapIdentityApi)
         {DomainEntity}Controller.cs   (per domain resource)
       Services/
         I{Name}Service.cs + {Name}Service.cs  (pairs)
         DynamoDbService.cs             (or AppDbContext.cs for Postgres)
-        JwtService.cs
-        PasswordService.cs
+        JwtService.cs                  (Postgres path: removed if no custom token generation needed)
+        PasswordService.cs             (Postgres path: removed)
         AuthService.cs
       Models/
-        User.cs
+        User.cs                        (Postgres path: replaced by AppUser.cs : IdentityUser)
+        AppUser.cs                     (Postgres path only — add domain-specific properties here)
         {DomainEntity}.cs
-        RefreshToken.cs
-        PasswordResetToken.cs
+        RefreshToken.cs                (Postgres path: removed — Identity manages tokens internally)
+        PasswordResetToken.cs          (Postgres path: removed — Identity manages tokens internally)
         Auth/                          (auth DTOs)
       Middleware/
-        JwtAuthenticationMiddleware.cs
+        JwtAuthenticationMiddleware.cs (Postgres path: removed)
     test/Server.Tests/
       Server.Tests.csproj
 
@@ -1221,6 +1403,7 @@ CDK sets `ASPNETCORE_ENVIRONMENT` based on stage: `"dev"` -> `"Development"`, an
       DatabaseStack.cs
       ApiStack.cs
       WebStack.cs
+      RdsProxyStack.cs          (Postgres + RDS Proxy only)
 ```
 
 Additional files from modules (StorageStack, StripeController, S3Service, background services, etc.) are described in each module file.
